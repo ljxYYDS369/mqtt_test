@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>低空终端 · 四模块总控制面板</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --mut:#8b949e;
+          --acc:#2f81f7; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#a371f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+         background:var(--bg); color:var(--fg); font-size:13px; }
+  header { padding:14px 18px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  h2 { font-size:13px; margin:0 0 10px; color:var(--mut); font-weight:600; }
+  .pill { padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--mut); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.off { color:var(--bad); border-color:var(--bad); }
+  .hint { margin-left:auto; color:var(--mut); font-size:11px; }
+  .bar { padding:10px 18px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input, select, button { background:var(--panel); color:var(--fg); border:1px solid var(--line);
+                          border-radius:6px; padding:6px 9px; font:inherit; }
+  button { cursor:pointer; }
+  button.primary { border-color:var(--acc); color:var(--acc); }
+  .grow { flex:1 1 220px; min-width:150px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; padding:14px 18px; }
+  .mod { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .mod h3 { margin:0 0 4px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .mod .role { color:var(--mut); font-size:11px; margin-bottom:10px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--mut); display:inline-block; }
+  .dot.on { background:var(--ok); box-shadow:0 0 6px var(--ok); }
+  .dot.idle { background:var(--warn); }
+  .flow { background:#0b0f14; border:1px dashed var(--line); border-radius:8px;
+          padding:9px 10px; font-size:11.5px; line-height:1.7; color:#a5d6ff; margin:8px 0; }
+  .flow b { color:var(--fg); font-weight:600; }
+  .flow .pc { color:var(--ok); }
+  .flow .nopc { color:var(--bad); }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:11.5px; }
+  .kv .k { color:var(--mut); }
+  .tag { font-size:10.5px; padding:1px 6px; border-radius:4px; border:1px solid var(--line); color:var(--mut); }
+  .tag.ok { color:var(--ok); border-color:var(--ok); }
+  .tag.no { color:var(--bad); border-color:var(--bad); }
+  .tag.warn { color:var(--warn); border-color:var(--warn); }
+  .legend { padding:0 18px 6px; color:var(--mut); font-size:11.5px; line-height:1.9; }
+  .legend code { color:#a5d6ff; }
+  .scroll { margin:0 18px 18px; max-height:34vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--bg); }
+  td.p { max-width:0; width:100%; overflow:hidden; text-overflow:ellipsis; color:#a5d6ff; }
+  .foot { padding:0 18px 24px; color:var(--mut); font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>低空终端 · 四模块总控制面板</h1>
+  <span id="status" class="pill">未连接</span>
+  <span id="mstat" class="pill">遥测 --</span>
+  <span class="hint">4G→MQTT 实时；其余链路见各卡片流向标注</span>
+</header>
+
+<div class="bar">
+  <select id="broker" class="grow"></select>
+  <input id="topic" class="grow" value="p4max/ljx369/telemetry" />
+  <button id="connect" class="primary">连接</button>
+  <button id="disconnect" disabled>断开</button>
+</div>
+
+<!-- ================= 四模块卡片 ================= -->
+<div class="grid">
+
+  <div class="mod">
+    <h3><span class="dot on" id="d-ws63"></span>① WS63 · 星闪 Mesh</h3>
+    <div class="role">发射端 · 20dBm 满功率循环广播</div>
+    <div class="flow">
+      <b>数据源</b>：ESP32-P4 生成 182B 载荷<br>
+      <b>流向</b>：ESP32 —UART1(921600)—▶ WS63 —星闪组播(20dBm)—▶ <b>空间对端</b>(另一星闪设备)
+      <br><span class="pc">电脑侧</span>：无线上行，PC 不经此链路收数据；镜像见串口日志
+    </div>
+    <div class="kv">
+      <div class="k">发送字节</div><div id="v-ws63-tx">--</div>
+      <div class="k">发送包数</div><div id="v-ws63-pkt">--</div>
+      <div class="k">包间隔/长度</div><div>250ms / 182B</div>
+    </div>
+  </div>
+
+  <div class="mod">
+    <h3><span class="dot on" id="d-4g"></span>② ML307R · 4G 蜂窝</h3>
+    <div class="role">上云链路 · MQTT 公共 broker</div>
+    <div class="flow">
+      <b>数据源</b>：ESP32 遥测 JSON（1Hz，含各链路计数）<br>
+      <b>流向</b>：ESP32 —UART4—▶ ML307R —LTE/基站—▶ <b>broker.emqx.io:1883</b>
+      —MQTT over WebSocket—▶ <span class="pc">本面板 / 电脑</span>
+    </div>
+    <div class="kv">
+      <div class="k">发布条数</div><div id="v-pub">--</div>
+      <div class="k">broker</div><div>broker.emqx.io:1883</div>
+      <div class="k">topic</div><div>p4max/ljx369/telemetry</div>
+    </div>
+  </div>
+
+  <div class="mod">
+    <h3><span class="dot idle" id="d-exd"></span>③ EXD35 · RID 发射</h3>
+    <div class="role">发射端 · 广播无人机远程识别</div>
+    <div class="flow">
+      <b>数据源</b>：ESP32 喂 MAVLink2 直线轨迹（2Hz 位置）<br>
+      <b>流向</b>：ESP32 —UART2—▶ EXD35 —2.4G RID 广播—▶ <b>手机 App</b>(嗖嗖fly)
+      <br><span class="nopc">电脑侧</span>：<b>收不到</b> —— PC 需 WiFi 监听模式抓 Beacon，
+      当前 Intel 网卡不支持；EXD35 的 BLE 通道也尚未开启
+    </div>
+    <div class="kv">
+      <div class="k">喂数帧数</div><div id="v-rid-f">--</div>
+      <div class="k">喂数字节</div><div id="v-rid-tx">--</div>
+      <div class="k">轨迹</div><div>广州 23.0N/113.0E 直线循环</div>
+    </div>
+  </div>
+
+  <div class="mod">
+    <h3><span class="dot idle" id="d-adsb"></span>④ VS36-12D · ADS-B 接收</h3>
+    <div class="role">接收端 · 仅飞机经过时才有数据</div>
+    <div class="flow">
+      <b>数据源</b>：空中飞机 ADS-B 广播（1090MHz，被动）<br>
+      <b>流向</b>：飞机 —1090MHz—▶ VS36 —UART3—▶ ESP32 —▶ (a)串口日志给电脑
+      (b)避让算法 → 威胁数并入 MQTT 遥测 —▶ <span class="pc">面板 threats</span>
+    </div>
+    <div class="kv">
+      <div class="k">有效帧</div><div id="v-adsb">--</div>
+      <div class="k">接收字节</div><div id="v-adsb-rx">--</div>
+      <div class="k">工作模式</div><div>Mode 7（明文实时输出）</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================= 全链路一览 ================= -->
+<div class="legend">
+  <h2>全链路数据流一览</h2>
+  <div>① <b>WS63</b>：ESP32 → UART1 → WS63 →(星闪 20dBm)→ 空间对端　<span class="tag">电脑不经此路</span></div>
+  <div>② <b>4G</b>：ESP32 → UART4 → ML307R →(LTE)→ broker.emqx.io →(WSS)→ <b>电脑面板</b>　<span class="tag ok">电脑可看</span></div>
+  <div>③ <b>EXD35</b>：ESP32 → UART2 → EXD35 →(2.4G RID)→ 手机 App　<span class="tag no">电脑当前收不到</span></div>
+  <div>④ <b>VS36</b>：飞机 →(1090MHz)→ VS36 → UART3 → ESP32 → 串口日志/避让算法　<span class="tag warn">仅飞机经过时有</span></div>
+</div>
+
+<div class="grid" style="padding-top:0">
+  <div class="mod">
+    <h3>实时遥测（来自 4G → MQTT）</h3>
+    <div class="kv">
+      <div class="k">seq / uptime</div><div id="v-seq">-- / --</div>
+      <div class="k">避让算法 loops</div><div id="v-avoid">--</div>
+      <div class="k">威胁数 threats</div><div id="v-threats">--</div>
+      <div class="k">最后更新</div><div id="v-last">--</div>
+    </div>
+  </div>
+  <div class="mod">
+    <h3>接收统计</h3>
+    <div class="kv">
+      <div class="k">收到条数</div><div id="v-count">0</div>
+      <div class="k">速率 msg/s</div><div id="v-rate">0</div>
+      <div class="k">断号次数</div><div id="v-gap">0</div>
+    </div>
+  </div>
+</div>
+
+<div class="scroll">
+  <table>
+    <thead><tr><th>时间</th><th>topic</th><th>bytes</th><th>payload</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div class="foot">
+  数据缓存于本浏览器（IndexedDB）；关闭页面即停止接收。公共 broker 无历史补发，离线期间数据不保留。
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="panel.js"></script>
+</body>
+</html>
