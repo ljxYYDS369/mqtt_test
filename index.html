@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MQTT 遥测看板 · 浏览器本地缓存</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --mut:#8b949e; --acc:#2f81f7; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family: ui-monospace, "Cascadia Code", Consolas, Menlo, monospace; background:var(--bg); color:var(--fg); font-size:13px; }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .pill { padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--mut); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  .pill.off { color:var(--bad); border-color:var(--bad); }
+  .hint { margin-left:auto; color:var(--mut); font-size:11px; }
+  .bar { padding:10px 18px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input, select, button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font:inherit; }
+  input:focus, select:focus { outline:1px solid var(--acc); }
+  button { cursor:pointer; }
+  button.primary { border-color:var(--acc); color:var(--acc); }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .grow { flex:1 1 220px; min-width:150px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; padding:14px 18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .card .k { color:var(--mut); font-size:11px; }
+  .card .v { font-size:20px; margin-top:4px; }
+  .wrap { padding:0 18px 18px; }
+  canvas { width:100%; height:72px; background:var(--panel); border:1px solid var(--line); border-radius:8px; display:block; margin-bottom:12px; }
+  .scroll { max-height:46vh; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; overflow:hidden; }
+  th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--bg); z-index:1; }
+  td.payload { max-width:0; width:100%; overflow:hidden; text-overflow:ellipsis; color:#a5d6ff; }
+  .tag { font-size:11px; padding:1px 6px; border-radius:4px; border:1px solid var(--line); color:var(--mut); }
+  .tag.sim { color:var(--warn); border-color:var(--warn); }
+  .tag.rx { color:var(--ok); border-color:var(--ok); }
+  label.chk { display:flex; align-items:center; gap:6px; color:var(--mut); white-space:nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MQTT 遥测看板</h1>
+  <span id="status" class="pill">未连接</span>
+  <span class="hint">数据缓存在本浏览器（IndexedDB）· 关闭页面即停止接收</span>
+</header>
+
+<div class="bar">
+  <select id="broker" class="grow"></select>
+  <input id="topic" class="grow" value="p4max/ljx369/telemetry" placeholder="topic" />
+  <button id="connect" class="primary">连接</button>
+  <button id="disconnect" disabled>断开</button>
+  <label class="chk"><input type="checkbox" id="simulate" /> 本地模拟数据</label>
+  <button id="pubtest" disabled>发一条测试</button>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="k">本次接收</div><div class="v" id="c-session">0</div></div>
+  <div class="card"><div class="k">缓存条数</div><div class="v" id="c-store">0</div></div>
+  <div class="card"><div class="k">速率 msg/s</div><div class="v" id="c-rate">0</div></div>
+  <div class="card"><div class="k">最后一条</div><div class="v" id="c-last">-</div></div>
+  <div class="card"><div class="k">累计字节</div><div class="v" id="c-bytes">0</div></div>
+</div>
+
+<div class="wrap">
+  <canvas id="spark" width="1200" height="72"></canvas>
+  <div class="bar" style="border:none;padding:0 0 10px">
+    <button id="export-json">导出 JSON</button>
+    <button id="export-csv">导出 CSV</button>
+    <button id="clear" class="danger">清空缓存</button>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>时间</th><th>来源</th><th>topic</th><th>字节</th><th>payload</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const BROKERS = {
+  "EMQX 公共 wss": "wss://broker.emqx.io:8084/mqtt",
+  "HiveMQ 公共 wss": "wss://broker.hivemq.com:8884/mqtt",
+  "本地 EMQX ws": "ws://localhost:8084/mqtt"
+};
+const DB_NAME = "mqtt_cache";
+const STORE = "messages";
+const MAX_ROWS = 300;
+
+const $ = (id) => document.getElementById(id);
+const brokerSel = $("broker"), topicInput = $("topic"), statusEl = $("status");
+const connectBtn = $("connect"), disconnectBtn = $("disconnect");
+const simChk = $("simulate"), pubBtn = $("pubtest");
+const rowsEl = $("rows"), spark = $("spark");
+const cSession = $("c-session"), cStore = $("c-store"), cRate = $("c-rate"), cLast = $("c-last"), cBytes = $("c-bytes");
+
+let client = null, connected = false, simTimer = null;
+let sessionCount = 0, totalBytes = 0, lastTs = 0;
+let storeCount = 0, writeBuf = [], rowBuf = [];
+let rateWindow = [], rateSamples = [];
+
+for (const name in BROKERS) {
+  const o = document.createElement("option");
+  o.value = BROKERS[name]; o.textContent = name;
+  brokerSel.appendChild(o);
+}
+
+function loadCfg() {
+  const q = new URLSearchParams(location.search);
+  const saved = JSON.parse(localStorage.getItem("mqttcfg") || "{}");
+  const broker = q.get("broker") || saved.broker || brokerSel.value;
+  if ([...brokerSel.options].some(o => o.value === broker)) brokerSel.value = broker;
+  else { const o = document.createElement("option"); o.value = broker; o.textContent = broker; brokerSel.appendChild(o); brokerSel.value = broker; }
+  topicInput.value = q.get("topic") || saved.topic || topicInput.value;
+}
+function saveCfg() {
+  localStorage.setItem("mqttcfg", JSON.stringify({ broker: brokerSel.value, topic: topicInput.value.trim() }));
+}
+loadCfg();
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = "pill" + (cls ? " " + cls : "");
+}
+
+let dbPromise = null;
+function openDB() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((res, rej) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      const st = db.createObjectStore(STORE, { keyPath: "id", autoIncrement: true });
+      st.createIndex("ts", "ts");
+      st.createIndex("topic", "topic");
+    };
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+  return dbPromise;
+}
+async function dbCount() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const rq = db.transaction(STORE, "readonly").objectStore(STORE).count();
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  });
+}
+async function dbAll() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const rq = db.transaction(STORE, "readonly").objectStore(STORE).getAll();
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  });
+}
+async function dbClear() {
+  const db = await openDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+function flushWrites() {
+  if (!writeBuf.length) return;
+  const batch = writeBuf; writeBuf = [];
+  openDB().then(db => {
+    const tx = db.transaction(STORE, "readwrite");
+    const st = tx.objectStore(STORE);
+    for (const rec of batch) st.add(rec);
+    tx.oncomplete = () => { storeCount += batch.length; renderStats(); };
+  }).catch(() => {});
+}
+
+function onMessage(topic, payloadBytes, source) {
+  const now = Date.now();
+  let text;
+  try { text = new TextDecoder().decode(payloadBytes); }
+  catch (e) { text = String(payloadBytes); }
+  const rec = { ts: now, topic, size: payloadBytes.length, payload: text, src: source };
+  sessionCount++;
+  totalBytes += payloadBytes.length;
+  lastTs = now;
+  rateWindow.push(now);
+  writeBuf.push(rec);
+  rowBuf.push(rec);
+  if (rowBuf.length > MAX_ROWS) rowBuf = rowBuf.slice(rowBuf.length - MAX_ROWS);
+}
+
+let renderTimer = null;
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    flushRows();
+    renderStats();
+  }, 250);
+}
+
+function esc(s) { return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" }[c])); }
+
+function flushRows() {
+  if (!rowBuf.length) return;
+  const existing = rowsEl.childElementCount;
+  const frag = document.createDocumentFragment();
+  for (const rec of rowBuf) {
+    const tr = document.createElement("tr");
+    const t = new Date(rec.ts).toLocaleTimeString("zh-CN", { hour12: false });
+    tr.innerHTML =
+      "<td>" + esc(t) + "</td>" +
+      "<td><span class='tag " + (rec.src === "sim" ? "sim" : "rx") + "'>" + (rec.src === "sim" ? "模拟" : "接收") + "</span></td>" +
+      "<td>" + esc(rec.topic) + "</td>" +
+      "<td>" + rec.size + "</td>" +
+      "<td class='payload' title='" + esc(rec.payload).slice(0, 400) + "'>" + esc(rec.payload) + "</td>";
+    frag.appendChild(tr);
+  }
+  rowsEl.insertBefore(frag, rowsEl.firstChild);
+  let extra = existing + rowBuf.length - MAX_ROWS;
+  while (extra-- > 0 && rowsEl.lastChild) rowsEl.removeChild(rowsEl.lastChild);
+  rowBuf = [];
+}
+
+function renderStats() {
+  cSession.textContent = sessionCount.toLocaleString();
+  cStore.textContent = storeCount.toLocaleString();
+  cBytes.textContent = totalBytes.toLocaleString();
+  const rate = rateSamples.length ? rateSamples[rateSamples.length - 1] : 0;
+  cRate.textContent = rate.toLocaleString();
+  cLast.textContent = lastTs ? Math.max(0, Math.round((Date.now() - lastTs) / 1000)) + "s 前" : "-";
+}
+
+function tickRate() {
+  const now = Date.now();
+  rateWindow = rateWindow.filter(t => now - t <= 1000);
+  rateSamples.push(rateWindow.length);
+  if (rateSamples.length > 600) rateSamples = rateSamples.slice(rateSamples.length - 600);
+  renderStats();
+  drawSpark();
+}
+
+function drawSpark() {
+  const ctx = spark.getContext("2d");
+  const W = spark.width, H = spark.height;
+  ctx.clearRect(0, 0, W, H);
+  const n = rateSamples.length;
+  if (n < 2) return;
+  const max = Math.max(1, ...rateSamples);
+  ctx.strokeStyle = "#2f81f7"; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * W;
+    const y = H - (rateSamples[i] / max) * (H - 8) - 4;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = "#8b949e"; ctx.font = "11px monospace";
+  ctx.fillText("峰值 " + max + " msg/s", 8, 14);
+}
+
+function makeClientId() { return "mqttdb-" + Math.random().toString(16).slice(2, 10); }
+
+function connect() {
+  const url = brokerSel.value.trim();
+  const topic = topicInput.value.trim() || "p4max/ljx369/telemetry";
+  if (!url) { setStatus("请选择 broker", "off"); return; }
+  disconnect();
+  saveCfg();
+  setStatus("连接中…", "");
+  try {
+    client = mqtt.connect(url, { clientId: makeClientId(), clean: true, reconnectPeriod: 2000, connectTimeout: 8000, keepalive: 30 });
+  } catch (e) { setStatus("错误: " + e.message, "off"); return; }
+  client.on("connect", () => {
+    connected = true;
+    connectBtn.disabled = true; disconnectBtn.disabled = false; pubBtn.disabled = false;
+    setStatus("已连接 · " + topic, "on");
+    client.subscribe(topic, { qos: 0 }, (err) => { if (err) setStatus("订阅失败: " + err.message, "off"); });
+  });
+  client.on("reconnect", () => setStatus("重连中…", ""));
+  client.on("close", () => {
+    connected = false;
+    connectBtn.disabled = false; disconnectBtn.disabled = true; pubBtn.disabled = true;
+    setStatus("已断开", "off");
+  });
+  client.on("error", (e) => setStatus("错误: " + e.message, "off"));
+  client.on("message", (tp, pl) => { onMessage(tp, pl, "rx"); scheduleRender(); });
+}
+
+function disconnect() {
+  if (client) { try { client.end(true); } catch (e) {} client = null; }
+  connected = false;
+  connectBtn.disabled = false; disconnectBtn.disabled = true; pubBtn.disabled = true;
+}
+
+function publishTest() {
+  if (!client || !connected) return;
+  const topic = topicInput.value.trim();
+  const sample = { seq: Math.floor(Math.random() * 1e6), uptime: Math.floor(performance.now() / 1000), ws63_tx: Math.floor(Math.random() * 1e5), rid_frames: Math.floor(Math.random() * 1e4), avoid_loops: Math.floor(Math.random() * 1e3), t: +(Math.random() * 10 + 20).toFixed(1), ts: Date.now() };
+  client.publish(topic, JSON.stringify(sample), { qos: 0 });
+  onMessage(topic, new TextEncoder().encode(JSON.stringify(sample)), "sim");
+  scheduleRender();
+}
+
+function toggleSim() {
+  if (simChk.checked) {
+    if (simTimer) return;
+    simTimer = setInterval(() => {
+      const topic = topicInput.value.trim() || "p4max/ljx369/telemetry";
+      const sample = { seq: Math.floor(Math.random() * 1e6), uptime: Math.floor(performance.now() / 1000), ws63_tx: Math.floor(Math.random() * 1e5), rid_frames: Math.floor(Math.random() * 1e4), avoid_loops: Math.floor(Math.random() * 1e3), rssi: -(60 + Math.floor(Math.random() * 30)), t: +(Math.random() * 10 + 20).toFixed(1), ts: Date.now() };
+      onMessage(topic, new TextEncoder().encode(JSON.stringify(sample)), "sim");
+      scheduleRender();
+    }, 500);
+  } else {
+    clearInterval(simTimer); simTimer = null;
+  }
+}
+
+async function exportData(kind) {
+  const all = await dbAll();
+  if (!all.length) { alert("缓存为空"); return; }
+  let data, mime, name;
+  if (kind === "json") {
+    data = JSON.stringify(all, null, 2);
+    mime = "application/json"; name = "mqtt_cache.json";
+  } else {
+    const head = "ts,iso,topic,size,src,payload\n";
+    const body = all.map(r => [r.ts, new Date(r.ts).toISOString(), r.topic, r.size, r.src, '"' + String(r.payload).replace(/"/g, '""') + '"'].join(",")).join("\n");
+    data = head + body; mime = "text/csv"; name = "mqtt_cache.csv";
+  }
+  const blob = new Blob([data], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+connectBtn.onclick = connect;
+disconnectBtn.onclick = disconnect;
+pubBtn.onclick = publishTest;
+simChk.onchange = toggleSim;
+$("export-json").onclick = () => exportData("json");
+$("export-csv").onclick = () => exportData("csv");
+$("clear").onclick = async () => { await dbClear(); storeCount = 0; renderStats(); };
+
+(async function init() {
+  storeCount = await dbCount();
+  renderStats();
+  setInterval(tickRate, 1000);
+  setInterval(flushWrites, 500);
+  setInterval(renderStats, 1000);
+})();
+</script>
+</body>
+</html>
